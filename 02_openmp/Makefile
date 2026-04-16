@@ -1,30 +1,33 @@
+CXX = g++-15
+CXXFLAGS = -fopenmp
+
 00_hello: 00_hello.cpp
-	g++ 00_hello.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 01_num_threads: 01_num_threads.cpp
-	g++ 01_num_threads.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 02_loop: 02_loop.cpp
-	g++ 02_loop.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 03_iterator: 03_iterator.cpp
-	g++ 03_iterator.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 04_scope: 04_scope.cpp
-	g++ 04_scope.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 05_scope: 05_scope.cpp 05_bar.cpp
-	g++ 05_scope.cpp 05_bar.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $^ -o $@
 06_sections: 06_sections.cpp
-	g++ 06_sections.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 07_private: 07_private.cpp
-	g++ 07_private.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 08_tasks: 08_tasks.cpp
-	g++ 08_tasks.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 09_reduction: 09_reduction.cpp
-	g++ 09_reduction.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 10_atomic: 10_atomic.cpp
-	g++ 10_atomic.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 11_scan: 11_scan.cpp
-	g++ 11_scan.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 12_pi: 12_pi.cpp
-	g++ 12_pi.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 13_merge_sort: 13_merge_sort.cpp
-	g++ 13_merge_sort.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
 14_bucket_sort: 14_bucket_sort.cpp
-	g++ 14_bucket_sort.cpp -fopenmp
+	$(CXX) $(CXXFLAGS) $< -o $@
