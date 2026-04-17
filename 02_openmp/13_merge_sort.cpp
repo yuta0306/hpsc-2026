@@ -23,8 +23,11 @@ void merge(std::vector<int>& vec, int begin, int mid, int end) {
 void merge_sort(std::vector<int>& vec, int begin, int end) {
   if(begin < end) {
     int mid = (begin + end) / 2;
+    #pragma omp task shared(vec)
     merge_sort(vec, begin, mid);
+    #pragma omp task shared(vec)
     merge_sort(vec, mid+1, end);
+    #pragma omp taskwait
     merge(vec, begin, mid, end);
   }
 }
@@ -37,9 +40,25 @@ int main() {
     printf("%d ",vec[i]);
   }
   printf("\n");
-  merge_sort(vec, 0, n-1);
+  #pragma omp parallel
+  {
+    #pragma omp single
+    merge_sort(vec, 0, n-1);
+  }
   for (int i=0; i<n; i++) {
     printf("%d ",vec[i]);
   }
   printf("\n");
 }
+
+/*
+  time ./13_merge_sort
+  7 49 73 58 130 72 144 78 123 109 40 165 92 42 187 103 127 129 40 12 
+  7 12 40 40 42 49 58 72 73 78 92 103 109 123 127 129 130 144 165 187 
+  ./13_merge_sort  0.01s user 0.01s system 88% cpu 0.020 total
+
+  Using OpenMP:
+  7 49 73 58 130 72 144 78 123 109 40 165 92 42 187 103 127 129 40 12 
+  7 12 40 40 42 49 58 72 73 78 92 103 109 123 127 129 130 144 165 187 
+  ./13_merge_sort  0.01s user 0.00s system 88% cpu 0.015 total
+*/
