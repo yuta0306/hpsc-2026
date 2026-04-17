@@ -1,12 +1,6 @@
 # hpc_lecture
 
-> [!NOTE]
-> Builtin gcc doesn't support openmp, so need to install the latest gcc via homebrew on macOS.
->
-> `brew install gcc`
-
 Student ID: 23M13958
-
 
 |          | Topic                                | Sample code     |
 | -------- | ------------------------------------ | --------------- |
@@ -24,3 +18,10 @@ Student ID: 23M13958
 | Class 12 | Containers                           | 12_container    |
 | Class 13 | Scientific computing                 | 13_scientific   |
 | Class 14 | Deep Learning                        | 14_pytorch      |
+
+## MEMO
+
+> [!NOTE]
+> Builtin gcc doesn't support openmp, so need to install the latest gcc via homebrew on macOS.
+>
+> `brew install gcc`
