@@ -26,9 +26,9 @@ int main() {
     }
   }
 
-  std::vector<int> offset(range, 0);
-  for (int i = 1; i < range; i++)
-    offset[i] = bucket[i - 1];
+  std::vector<int> offset(range);
+  for (int i = 0; i < range; i++)
+    offset[i] = bucket[i];
 
   std::vector<int> temp(range);
 #pragma omp parallel
@@ -41,10 +41,11 @@ int main() {
       offset[i] += temp[i - j];
   }
 
-#pragma omp parallel for
+#pragma omp parallel for schedule(dynamic)
   for (int i = 0; i < range; i++) {
+    int start = (i == 0) ? 0 : offset[i - 1];
     for (int j = 0; j < bucket[i]; j++) {
-      key[offset[i] + j] = i;
+      key[start + j] = i;
     }
   }
 
@@ -64,5 +65,5 @@ int main() {
   time ./14_bucket_sort
   2 4 3 3 0 2 4 3 3 4 0 0 2 2 2 3 2 4 0 2 3 4 4 2 0 3 4 3 1 0 2 1 2 2 0 3 4 4 4 1 2 2 3 1 0 0 3 1 4 2 
   0 0 0 0 0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 3 3 3 3 3 3 3 3 3 3 3 4 4 4 4 4 4 4 4 4 4 4 
-  ./14_bucket_sort  0.01s user 0.01s system 95% cpu 0.022 total
+  ./14_bucket_sort  0.01s user 0.01s system 98% cpu 0.015 total
 */
