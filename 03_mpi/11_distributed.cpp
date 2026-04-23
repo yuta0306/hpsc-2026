@@ -13,7 +13,7 @@ int main(int argc, char** argv) {
   int size, rank;
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  Body ibody[N/size], jbody[N/size];
+  Body ibody[N/size], jbody[N/size], sbody[N/size];
   srand48(rank);
   for(int i=0; i<N/size; i++) {
     ibody[i].x = jbody[i].x = drand48();
@@ -21,14 +21,18 @@ int main(int argc, char** argv) {
     ibody[i].m = jbody[i].m = drand48();
     ibody[i].fx = jbody[i].fx = ibody[i].fy = jbody[i].fy = 0;
   }
-  int recv_from = (rank + 1) % size;
   int send_to = (rank - 1 + size) % size;
   MPI_Datatype MPI_BODY;
   MPI_Type_contiguous(5, MPI_DOUBLE, &MPI_BODY);
   MPI_Type_commit(&MPI_BODY);
+  MPI_Win win;
+  MPI_Win_create(jbody, (N/size) * sizeof(Body), sizeof(Body),
+                 MPI_INFO_NULL, MPI_COMM_WORLD, &win);
   for(int irank=0; irank<size; irank++) {
-    MPI_Send(jbody, N/size, MPI_BODY, send_to, 0, MPI_COMM_WORLD);
-    MPI_Recv(jbody, N/size, MPI_BODY, recv_from, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    for(int i=0; i<N/size; i++) sbody[i] = jbody[i];
+    MPI_Win_fence(0, win);
+    MPI_Put(sbody, N/size, MPI_BODY, send_to, 0, N/size, MPI_BODY, win);
+    MPI_Win_fence(0, win);
     for(int i=0; i<N/size; i++) {
       for(int j=0; j<N/size; j++) {
         double rx = ibody[i].x - jbody[j].x;
@@ -49,5 +53,46 @@ int main(int argc, char** argv) {
       }
     }
   }
+  MPI_Win_free(&win);
   MPI_Finalize();
 }
+
+/*
+  MPI_Send/MPI_Recv
+    mpirun -n 8 a.out
+    0 27.4217 -45.9659
+    1 -80.5552 -25.5702
+    2 74.1105 30.6659
+    3 -123.102 -34.0765
+    5 -11.4538 13.8815
+    6 7.43006 4.5741
+    7 -7.3739 -21.9327
+    8 -168.199 -48.9042
+    10 92.6142 -63.1341
+    11 40.7691 18.7558
+    12 0.465195 18.5385
+    13 11.4524 6.1224
+    15 0.633036 -17.2224
+    16 123.646 53.6965
+    17 -13.6764 -53.7064
+    18 104.164 27.1904
+
+  MPI_Put
+    mpirun -n 8 a.out
+    0 27.4217 -45.9659
+    1 -80.5552 -25.5702
+    2 74.1105 30.6659
+    3 -123.102 -34.0765
+    5 -11.4538 13.8815
+    6 7.43006 4.5741
+    7 -7.3739 -21.9327
+    8 -168.199 -48.9042
+    10 92.6142 -63.1341
+    11 40.7691 18.7558
+    12 0.465195 18.5385
+    13 11.4524 6.1224
+    15 0.633036 -17.2224
+    16 123.646 53.6965
+    17 -13.6764 -53.7064
+    18 104.164 27.1904
+*/
