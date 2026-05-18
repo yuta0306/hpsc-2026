@@ -6,7 +6,8 @@
 using namespace std;
 
 int main (int argc, char** argv) {
-  const int NX = 10000, NY = 10000;
+  hsize_t NX = 10000, NY = 10000;
+  if (argc > 1) NX = NY = atoi(argv[1]);
   hsize_t dim[2] = {2, 2};
   int mpisize, mpirank;
   MPI_Init(&argc, &argv);
