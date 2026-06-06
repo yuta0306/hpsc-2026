@@ -247,6 +247,9 @@ int main(int argc, const char **argv) {
   CUDA_CHECK(cudaFuncSetAttribute(kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   DYNAMIC_SMEM_BYTES));
+  CUDA_CHECK(cudaFuncSetAttribute(kernel,
+                                  cudaFuncAttributePreferredSharedMemoryCarveout,
+                                  cudaSharedmemCarveoutMaxShared));
 
   TimingResult convert_time = measure_gpu(warmup, repeat, [&]() {
     convert_float_to_half<<< convert_a_grid, convert_block >>>(A, A_half, int64_t(m) * int64_t(k));
