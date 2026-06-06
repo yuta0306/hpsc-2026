@@ -13,7 +13,7 @@
 using namespace std;
 using namespace nvcuda;
 
-constexpr int TILE_M = 128;
+constexpr int TILE_M = 256;
 constexpr int TILE_N = 64;
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
@@ -26,7 +26,7 @@ constexpr int LOAD_VECTOR_WIDTH = 4;
 constexpr int REUSE_B_FRAGMENTS = 1;
 constexpr int WARPS_PER_BLOCK = 8;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
-constexpr int WARP_M_FRAGS = 1;
+constexpr int WARP_M_FRAGS = 2;
 constexpr int WARP_N_FRAGS = TILE_N / WMMA_N;
 constexpr int DYNAMIC_SMEM_BYTES = (TILE_K * SMEM_A_LD + TILE_N * SMEM_B_LD) * int(sizeof(half));
 
@@ -247,9 +247,6 @@ int main(int argc, const char **argv) {
   CUDA_CHECK(cudaFuncSetAttribute(kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   DYNAMIC_SMEM_BYTES));
-  CUDA_CHECK(cudaFuncSetAttribute(kernel,
-                                  cudaFuncAttributePreferredSharedMemoryCarveout,
-                                  cudaSharedmemCarveoutMaxShared));
 
   TimingResult convert_time = measure_gpu(warmup, repeat, [&]() {
     convert_float_to_half<<< convert_a_grid, convert_block >>>(A, A_half, int64_t(m) * int64_t(k));
