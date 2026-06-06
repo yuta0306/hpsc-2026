@@ -12,23 +12,26 @@
 using namespace std;
 
 constexpr int TILE_M = 128;
-constexpr int TILE_N = 64;
+constexpr int TILE_N = 128;
 constexpr int TILE_K = 64;
 constexpr int WGMMA_M = 64;
-constexpr int WGMMA_N = 64;
+constexpr int WGMMA_N = 128;
 constexpr int WGMMA_K = 16;
 constexpr int WARPGROUPS_PER_BLOCK = TILE_M / WGMMA_M;
 constexpr int WARPS_PER_BLOCK = WARPGROUPS_PER_BLOCK * 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
-constexpr int WGMMA_TILE_ELEMENTS = WGMMA_M * WGMMA_K;
+constexpr int WGMMA_A_TILE_ELEMENTS = WGMMA_M * WGMMA_K;
+constexpr int WGMMA_B_TILE_ELEMENTS = WGMMA_N * WGMMA_K;
 constexpr int WGMMA_STAGES_PER_TILE = TILE_K / WGMMA_K;
 constexpr int WGMMA_MN_GROUP_STRIDE = 64;
-constexpr int WGMMA_K_GROUP_STRIDE = 512;
-constexpr int WGMMA_LBO_BYTES = WGMMA_K_GROUP_STRIDE * int(sizeof(half));
+constexpr int WGMMA_A_K_GROUP_STRIDE = (WGMMA_M / 8) * WGMMA_MN_GROUP_STRIDE;
+constexpr int WGMMA_B_K_GROUP_STRIDE = (WGMMA_N / 8) * WGMMA_MN_GROUP_STRIDE;
+constexpr int WGMMA_A_LBO_BYTES = WGMMA_A_K_GROUP_STRIDE * int(sizeof(half));
+constexpr int WGMMA_B_LBO_BYTES = WGMMA_B_K_GROUP_STRIDE * int(sizeof(half));
 constexpr int WGMMA_SBO_BYTES = WGMMA_MN_GROUP_STRIDE * int(sizeof(half));
 constexpr int DYNAMIC_SMEM_BYTES =
-  (WARPGROUPS_PER_BLOCK * WGMMA_STAGES_PER_TILE * WGMMA_TILE_ELEMENTS +
-   WGMMA_STAGES_PER_TILE * WGMMA_N * WGMMA_K) * int(sizeof(half));
+  (WARPGROUPS_PER_BLOCK * WGMMA_STAGES_PER_TILE * WGMMA_A_TILE_ELEMENTS +
+   WGMMA_STAGES_PER_TILE * WGMMA_B_TILE_ELEMENTS) * int(sizeof(half));
 
 static const char *cublas_status_name(cublasStatus_t status) {
   switch (status) {
@@ -121,10 +124,10 @@ __global__ void convert_float_to_half(const float *input, half *output, int64_t 
   }
 }
 
-__device__ __forceinline__ int wgmma_k_major_index(int mn, int k) {
+__device__ __forceinline__ int wgmma_k_major_index(int mn, int k, int k_group_stride) {
   return (mn & 7) * 8 + (k & 7) +
          (mn >> 3) * WGMMA_MN_GROUP_STRIDE +
-         (k >> 3) * WGMMA_K_GROUP_STRIDE;
+         (k >> 3) * k_group_stride;
 }
 
 __device__ __forceinline__ uint32_t smem_address(const void *ptr) {
@@ -134,11 +137,11 @@ __device__ __forceinline__ uint32_t smem_address(const void *ptr) {
   return address;
 }
 
-__device__ __forceinline__ uint64_t wgmma_descriptor(const void *ptr) {
+__device__ __forceinline__ uint64_t wgmma_descriptor(const void *ptr, int lbo_bytes) {
   uint64_t address = smem_address(ptr);
   uint64_t desc = 0;
   desc |= ((address >> 4) & 0x3ffffull);
-  desc |= (uint64_t(WGMMA_LBO_BYTES >> 4) & 0x3ffffull) << 16;
+  desc |= (uint64_t(lbo_bytes >> 4) & 0x3ffffull) << 16;
   desc |= (uint64_t(WGMMA_SBO_BYTES >> 4) & 0x3ffffull) << 32;
   return desc;
 }
@@ -159,16 +162,20 @@ __device__ __forceinline__ void wgmma_shared_fence() {
   asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
 }
 
-__device__ __forceinline__ void wgmma_m64n64k16_f32_f16_f16(float d[32],
-                                                            uint64_t desc_a,
-                                                            uint64_t desc_b) {
+__device__ __forceinline__ void wgmma_m64n128k16_f32_f16_f16(float d[64],
+                                                             uint64_t desc_a,
+                                                             uint64_t desc_b) {
   asm volatile(
-      "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
+      "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 "
       "{%0, %1, %2, %3, %4, %5, %6, %7, "
       "%8, %9, %10, %11, %12, %13, %14, %15, "
       "%16, %17, %18, %19, %20, %21, %22, %23, "
-      "%24, %25, %26, %27, %28, %29, %30, %31}, "
-      "%32, %33, 1, 1, 1, 0, 0;\n"
+      "%24, %25, %26, %27, %28, %29, %30, %31, "
+      "%32, %33, %34, %35, %36, %37, %38, %39, "
+      "%40, %41, %42, %43, %44, %45, %46, %47, "
+      "%48, %49, %50, %51, %52, %53, %54, %55, "
+      "%56, %57, %58, %59, %60, %61, %62, %63}, "
+      "%64, %65, 1, 1, 1, 0, 0;\n"
       : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]),
         "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]),
         "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]),
@@ -176,7 +183,15 @@ __device__ __forceinline__ void wgmma_m64n64k16_f32_f16_f16(float d[32],
         "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
         "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
         "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
-        "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+        "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]),
+        "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]),
+        "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]),
+        "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]),
+        "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]),
+        "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]),
+        "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
+        "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]),
+        "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
       : "l"(desc_a), "l"(desc_b)
       : "memory");
 }
@@ -192,41 +207,41 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   extern __shared__ half shared_storage[];
   half *block_a = shared_storage;
-  half *block_b = block_a + WARPGROUPS_PER_BLOCK * WGMMA_STAGES_PER_TILE * WGMMA_TILE_ELEMENTS;
+  half *block_b = block_a + WARPGROUPS_PER_BLOCK * WGMMA_STAGES_PER_TILE * WGMMA_A_TILE_ELEMENTS;
 
-  float acc[32];
-  for (int i = 0; i < 32; i++) {
+  float acc[64];
+  for (int i = 0; i < 64; i++) {
     acc[i] = 0.0f;
   }
   wgmma_fence();
 
   for (int k = 0; k < dim_k; k += TILE_K) {
-    for (int load = threadIdx.x; load < WARPGROUPS_PER_BLOCK * WGMMA_STAGES_PER_TILE * WGMMA_TILE_ELEMENTS; load += THREADS_PER_BLOCK) {
-      int wg_stage = load / WGMMA_TILE_ELEMENTS;
-      int rem = load - wg_stage * WGMMA_TILE_ELEMENTS;
+    for (int load = threadIdx.x; load < WARPGROUPS_PER_BLOCK * WGMMA_STAGES_PER_TILE * WGMMA_A_TILE_ELEMENTS; load += THREADS_PER_BLOCK) {
+      int wg_stage = load / WGMMA_A_TILE_ELEMENTS;
+      int rem = load - wg_stage * WGMMA_A_TILE_ELEMENTS;
       int wg = wg_stage / WGMMA_STAGES_PER_TILE;
       int stage = wg_stage - wg * WGMMA_STAGES_PER_TILE;
       int kk = rem / WGMMA_M;
       int row = rem - kk * WGMMA_M;
-      block_a[wg_stage * WGMMA_TILE_ELEMENTS + wgmma_k_major_index(row, kk)] =
+      block_a[wg_stage * WGMMA_A_TILE_ELEMENTS + wgmma_k_major_index(row, kk, WGMMA_A_K_GROUP_STRIDE)] =
         d_a[(k + stage * WGMMA_K + kk) * dim_m + offset_a_m + wg * WGMMA_M + row];
     }
-    for (int load = threadIdx.x; load < WGMMA_STAGES_PER_TILE * WGMMA_N * WGMMA_K; load += THREADS_PER_BLOCK) {
-      int stage = load / (WGMMA_N * WGMMA_K);
-      int rem = load - stage * WGMMA_N * WGMMA_K;
+    for (int load = threadIdx.x; load < WGMMA_STAGES_PER_TILE * WGMMA_B_TILE_ELEMENTS; load += THREADS_PER_BLOCK) {
+      int stage = load / WGMMA_B_TILE_ELEMENTS;
+      int rem = load - stage * WGMMA_B_TILE_ELEMENTS;
       int kk = rem / WGMMA_N;
       int col = rem - kk * WGMMA_N;
-      block_b[stage * WGMMA_TILE_ELEMENTS + wgmma_k_major_index(col, kk)] =
+      block_b[stage * WGMMA_B_TILE_ELEMENTS + wgmma_k_major_index(col, kk, WGMMA_B_K_GROUP_STRIDE)] =
         d_b[(offset_b_n + col) * dim_k + k + stage * WGMMA_K + kk];
     }
     __syncthreads();
     wgmma_shared_fence();
 
-    half *wg_a_base = block_a + wg_id * WGMMA_STAGES_PER_TILE * WGMMA_TILE_ELEMENTS;
+    half *wg_a_base = block_a + wg_id * WGMMA_STAGES_PER_TILE * WGMMA_A_TILE_ELEMENTS;
     for (int stage = 0; stage < WGMMA_STAGES_PER_TILE; stage++) {
-      uint64_t desc_a = wgmma_descriptor(wg_a_base + stage * WGMMA_TILE_ELEMENTS);
-      uint64_t desc_b = wgmma_descriptor(block_b + stage * WGMMA_TILE_ELEMENTS);
-      wgmma_m64n64k16_f32_f16_f16(acc, desc_a, desc_b);
+      uint64_t desc_a = wgmma_descriptor(wg_a_base + stage * WGMMA_A_TILE_ELEMENTS, WGMMA_A_LBO_BYTES);
+      uint64_t desc_b = wgmma_descriptor(block_b + stage * WGMMA_B_TILE_ELEMENTS, WGMMA_B_LBO_BYTES);
+      wgmma_m64n128k16_f32_f16_f16(acc, desc_a, desc_b);
     }
     wgmma_commit_group();
     wgmma_wait_group();
@@ -302,8 +317,8 @@ int main(int argc, const char **argv) {
   printf("CONFIG custom_kernel=inline_ptx_wgmma\n");
   printf("CONFIG wgmma_m=%d wgmma_n=%d wgmma_k=%d warpgroups_per_block=%d\n",
          WGMMA_M, WGMMA_N, WGMMA_K, WARPGROUPS_PER_BLOCK);
-  printf("CONFIG wgmma_lbo_bytes=%d wgmma_sbo_bytes=%d\n",
-         WGMMA_LBO_BYTES, WGMMA_SBO_BYTES);
+  printf("CONFIG wgmma_a_lbo_bytes=%d wgmma_b_lbo_bytes=%d wgmma_sbo_bytes=%d\n",
+         WGMMA_A_LBO_BYTES, WGMMA_B_LBO_BYTES, WGMMA_SBO_BYTES);
   printf("CONFIG dynamic_smem_bytes=%d\n", DYNAMIC_SMEM_BYTES);
   printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
          convert_block, convert_a_grid, convert_b_grid);
