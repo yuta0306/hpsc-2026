@@ -23,6 +23,7 @@ constexpr int SMEM_PAD = 8;
 constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
 constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
 constexpr int LOAD_VECTOR_WIDTH = 2;
+constexpr int REUSE_B_FRAGMENTS = 1;
 constexpr int WARPS_PER_BLOCK = 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 
@@ -150,14 +151,16 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     }
     __syncthreads();
     for (int kk = 0; kk < TILE_K; kk += WMMA_K) {
+      wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag[4];
+      for (int c = 0; c < 4; c++) {
+        wmma::load_matrix_sync(b_frag[c], &block_b[c * WMMA_N][kk], SMEM_B_LD);
+      }
       for (int r = 0; r < 2; r++) {
         int row_tile = warp_id * 2 + r;
         wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
         wmma::load_matrix_sync(a_frag, &block_a[kk][row_tile * WMMA_M], SMEM_A_LD);
         for (int c = 0; c < 4; c++) {
-          wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
-          wmma::load_matrix_sync(b_frag, &block_b[c * WMMA_N][kk], SMEM_B_LD);
-          wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
+          wmma::mma_sync(acc[r][c], a_frag, b_frag[c], acc[r][c]);
         }
       }
     }
@@ -230,6 +233,7 @@ int main(int argc, const char **argv) {
   printf("CONFIG smem_pad=%d smem_a_ld=%d smem_b_ld=%d\n",
          SMEM_PAD, SMEM_A_LD, SMEM_B_LD);
   printf("CONFIG load_vector_width=%d\n", LOAD_VECTOR_WIDTH);
+  printf("CONFIG reuse_b_fragments=%d\n", REUSE_B_FRAGMENTS);
   printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
          convert_block, convert_a_grid, convert_b_grid);
   printf("CONFIG flops=%lld\n", (long long)num_flops);
