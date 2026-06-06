@@ -13,6 +13,12 @@
 using namespace std;
 using namespace nvcuda;
 
+constexpr int TILE_M = 128;
+constexpr int TILE_N = 64;
+constexpr int TILE_K = 16;
+constexpr int WARPS_PER_BLOCK = 4;
+constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
+
 static const char *cublas_status_name(cublasStatus_t status) {
   switch (status) {
   case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
@@ -106,37 +112,37 @@ __global__ void convert_float_to_half(const float *input, half *output, int64_t 
 
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
 		       const half *d_a, const half *d_b, float *d_c) {
-  int offset_a_m = 64 * blockIdx.x;
-  int offset_b_n = 64 * blockIdx.y;
+  int offset_a_m = TILE_M * blockIdx.x;
+  int offset_b_n = TILE_N * blockIdx.y;
   int i = threadIdx.x;
   int warp_id = threadIdx.x / 32;
 
-  __shared__ half block_a[16][64];
-  __shared__ half block_b[64][16];
+  __shared__ half block_a[TILE_K][TILE_M];
+  __shared__ half block_b[TILE_N][TILE_K];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   for (int r = 0; r < 2; r++)
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
 
-  for (int k = 0; k < dim_k; k += 16) {
+  for (int k = 0; k < dim_k; k += TILE_K) {
     __syncthreads();
-    for (int j = 0; j < 16; ++j) {
+    for (int j = 0; j < TILE_K; ++j) {
       block_a[j][i] = d_a[(k + j) * dim_m + offset_a_m + i];
     }
-    for (int load = i; load < 16 * 64; load += 64) {
-      int b_n = load / 16;
-      int b_k = load % 16;
+    for (int load = i; load < TILE_N * TILE_K; load += THREADS_PER_BLOCK) {
+      int b_n = load / TILE_K;
+      int b_k = load % TILE_K;
       block_b[b_n][b_k] = d_b[(offset_b_n + b_n) * dim_k + k + b_k];
     }
     __syncthreads();
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
       wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], 64);
+      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], TILE_M);
       for (int c = 0; c < 4; c++) {
         wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], 16);
+        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], TILE_K);
         wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
       }
     }
@@ -168,8 +174,9 @@ int main(int argc, const char **argv) {
     fprintf(stderr, "usage: %s [m n k repeat warmup]\n", argv[0]);
     return EXIT_FAILURE;
   }
-  if ((m % 64) != 0 || (n % 64) != 0 || (k % 16) != 0) {
-    fprintf(stderr, "m and n must be multiples of 64, and k must be a multiple of 16\n");
+  if ((m % TILE_M) != 0 || (n % TILE_N) != 0 || (k % TILE_K) != 0) {
+    fprintf(stderr, "m must be a multiple of %d, n must be a multiple of %d, and k must be a multiple of %d\n",
+            TILE_M, TILE_N, TILE_K);
     return EXIT_FAILURE;
   }
 
@@ -194,16 +201,15 @@ int main(int argc, const char **argv) {
   CUBLAS_CHECK(cublasCreate(&cublas_handle));
   CUBLAS_CHECK(cublasSetMathMode(cublas_handle, CUBLAS_TENSOR_OP_MATH));
   int64_t num_flops = (2 * int64_t(m) * int64_t(n) * int64_t(k)) + (2 * int64_t(m) * int64_t(n));
-  int tile = 64;
-  dim3 block = dim3(tile);
-  dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
+  dim3 block = dim3(THREADS_PER_BLOCK);
+  dim3 grid = dim3((m + TILE_M - 1) / TILE_M, (n + TILE_N - 1) / TILE_N);
   int convert_block = 256;
   int convert_a_grid = (int)((int64_t(m) * int64_t(k) + convert_block - 1) / convert_block);
   int convert_b_grid = (int)((int64_t(k) * int64_t(n) + convert_block - 1) / convert_block);
 
   printf("CONFIG m=%d n=%d k=%d repeat=%d warmup=%d\n", m, n, k, repeat, warmup);
-  printf("CONFIG custom_tile=%d block=(%d,%d,%d) grid=(%d,%d,%d)\n",
-         tile, block.x, block.y, block.z, grid.x, grid.y, grid.z);
+  printf("CONFIG custom_tile_m=%d custom_tile_n=%d custom_tile_k=%d warps=%d block=(%d,%d,%d) grid=(%d,%d,%d)\n",
+         TILE_M, TILE_N, TILE_K, WARPS_PER_BLOCK, block.x, block.y, block.z, grid.x, grid.y, grid.z);
   printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
          convert_block, convert_a_grid, convert_b_grid);
   printf("CONFIG flops=%lld\n", (long long)num_flops);
