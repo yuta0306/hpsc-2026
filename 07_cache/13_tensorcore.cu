@@ -16,6 +16,9 @@ using namespace nvcuda;
 constexpr int TILE_M = 128;
 constexpr int TILE_N = 64;
 constexpr int TILE_K = 16;
+constexpr int SMEM_PAD = 8;
+constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
+constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
 constexpr int WARPS_PER_BLOCK = 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 
@@ -117,8 +120,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int i = threadIdx.x;
   int warp_id = threadIdx.x / 32;
 
-  __shared__ half block_a[TILE_K][TILE_M];
-  __shared__ half block_b[TILE_N][TILE_K];
+  __shared__ half block_a[TILE_K][SMEM_A_LD];
+  __shared__ half block_b[TILE_N][SMEM_B_LD];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   for (int r = 0; r < 2; r++)
@@ -139,10 +142,10 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     for (int r = 0; r < 2; r++) {
       int row_tile = warp_id * 2 + r;
       wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], TILE_M);
+      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], SMEM_A_LD);
       for (int c = 0; c < 4; c++) {
         wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], TILE_K);
+        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], SMEM_B_LD);
         wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
       }
     }
@@ -210,6 +213,8 @@ int main(int argc, const char **argv) {
   printf("CONFIG m=%d n=%d k=%d repeat=%d warmup=%d\n", m, n, k, repeat, warmup);
   printf("CONFIG custom_tile_m=%d custom_tile_n=%d custom_tile_k=%d warps=%d block=(%d,%d,%d) grid=(%d,%d,%d)\n",
          TILE_M, TILE_N, TILE_K, WARPS_PER_BLOCK, block.x, block.y, block.z, grid.x, grid.y, grid.z);
+  printf("CONFIG smem_pad=%d smem_a_ld=%d smem_b_ld=%d\n",
+         SMEM_PAD, SMEM_A_LD, SMEM_B_LD);
   printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
          convert_block, convert_a_grid, convert_b_grid);
   printf("CONFIG flops=%lld\n", (long long)num_flops);
