@@ -104,7 +104,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int warp_id = threadIdx.x / 32;
 
   __shared__ half block_a[16][64];
-  __shared__ half block_b[16][64];
+  __shared__ half block_b[64][16];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
   for (int r = 0; r < 2; r++)
@@ -115,7 +115,11 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
     __syncthreads();
     for (int j = 0; j < 16; ++j) {
       block_a[j][i] = __float2half(d_a[(k + j) * dim_m + offset_a_m + i]);
-      block_b[j][i] = __float2half(d_b[(offset_b_n + i) * dim_k + k + j]);
+    }
+    for (int load = i; load < 16 * 64; load += 64) {
+      int b_n = load / 16;
+      int b_k = load % 16;
+      block_b[b_n][b_k] = __float2half(d_b[(offset_b_n + b_n) * dim_k + k + b_k]);
     }
     __syncthreads();
     for (int r = 0; r < 2; r++) {
@@ -123,8 +127,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
       wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], 64);
       for (int c = 0; c < 4; c++) {
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[0][c * 16], 64);
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
+        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], 16);
         wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
       }
     }
