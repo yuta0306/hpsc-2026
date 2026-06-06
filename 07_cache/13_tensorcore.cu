@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <mma.h>
@@ -96,8 +97,15 @@ static double tflops_from_ms(int64_t flops, double ms) {
   return double(flops) / (ms * 1.0e-3) / 1.0e12;
 }
 
+__global__ void convert_float_to_half(const float *input, half *output, int64_t elements) {
+  int64_t idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < elements) {
+    output[idx] = __float2half(input[idx]);
+  }
+}
+
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
-		       float *d_a, float *d_b, float *d_c) {
+		       const half *d_a, const half *d_b, float *d_c) {
   int offset_a_m = 64 * blockIdx.x;
   int offset_b_n = 64 * blockIdx.y;
   int i = threadIdx.x;
@@ -114,12 +122,12 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   for (int k = 0; k < dim_k; k += 16) {
     __syncthreads();
     for (int j = 0; j < 16; ++j) {
-      block_a[j][i] = __float2half(d_a[(k + j) * dim_m + offset_a_m + i]);
+      block_a[j][i] = d_a[(k + j) * dim_m + offset_a_m + i];
     }
     for (int load = i; load < 16 * 64; load += 64) {
       int b_n = load / 16;
       int b_k = load % 16;
-      block_b[b_n][b_k] = __float2half(d_b[(offset_b_n + b_n) * dim_k + k + b_k]);
+      block_b[b_n][b_k] = d_b[(offset_b_n + b_n) * dim_k + k + b_k];
     }
     __syncthreads();
     for (int r = 0; r < 2; r++) {
@@ -166,10 +174,13 @@ int main(int argc, const char **argv) {
   }
 
   float *A, *B, *C, *C2;
+  half *A_half, *B_half;
   CUDA_CHECK(cudaMallocManaged(&A, m * k * sizeof(float)));
   CUDA_CHECK(cudaMallocManaged(&B, k * n * sizeof(float)));
   CUDA_CHECK(cudaMallocManaged(&C, m * n * sizeof(float)));
   CUDA_CHECK(cudaMallocManaged(&C2, m * n * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&A_half, m * k * sizeof(half)));
+  CUDA_CHECK(cudaMalloc(&B_half, k * n * sizeof(half)));
   for (int i=0; i<m; i++)
     for (int j=0; j<k; j++)
       A[k*i+j] = drand48();
@@ -186,11 +197,23 @@ int main(int argc, const char **argv) {
   int tile = 64;
   dim3 block = dim3(tile);
   dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
+  int convert_block = 256;
+  int convert_a_grid = (int)((int64_t(m) * int64_t(k) + convert_block - 1) / convert_block);
+  int convert_b_grid = (int)((int64_t(k) * int64_t(n) + convert_block - 1) / convert_block);
 
   printf("CONFIG m=%d n=%d k=%d repeat=%d warmup=%d\n", m, n, k, repeat, warmup);
   printf("CONFIG custom_tile=%d block=(%d,%d,%d) grid=(%d,%d,%d)\n",
          tile, block.x, block.y, block.z, grid.x, grid.y, grid.z);
+  printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
+         convert_block, convert_a_grid, convert_b_grid);
   printf("CONFIG flops=%lld\n", (long long)num_flops);
+
+  TimingResult convert_time = measure_gpu(warmup, repeat, [&]() {
+    convert_float_to_half<<< convert_a_grid, convert_block >>>(A, A_half, int64_t(m) * int64_t(k));
+    CUDA_CHECK(cudaGetLastError());
+    convert_float_to_half<<< convert_b_grid, convert_block >>>(B, B_half, int64_t(k) * int64_t(n));
+    CUDA_CHECK(cudaGetLastError());
+  });
 
   TimingResult cublas_time = measure_gpu(warmup, repeat, [&]() {
     CUBLAS_CHECK(cublasGemmEx(cublas_handle,
@@ -213,22 +236,31 @@ int main(int argc, const char **argv) {
     kernel<<< grid, block >>>(m,
 			      n,
 			      k,
-			      A,
-			      B,
+			      A_half,
+			      B_half,
 			      C2);
     CUDA_CHECK(cudaGetLastError());
   });
   double custom_tflops = tflops_from_ms(num_flops, custom_time.avg_ms);
   double custom_vs_cublas = custom_tflops / cublas_tflops;
+  double custom_with_convert_ms = convert_time.avg_ms + custom_time.avg_ms;
+  double custom_with_convert_tflops = tflops_from_ms(num_flops, custom_with_convert_ms);
+  double custom_with_convert_vs_cublas = custom_with_convert_tflops / cublas_tflops;
 
+  printf("PROFILE convert avg_ms=%.3f total_ms=%.3f wall_ms=%.3f\n",
+         convert_time.avg_ms, convert_time.total_ms, convert_time.wall_ms);
   printf("PROFILE cublas avg_ms=%.3f total_ms=%.3f wall_ms=%.3f tflops=%.3f\n",
          cublas_time.avg_ms, cublas_time.total_ms, cublas_time.wall_ms, cublas_tflops);
   printf("PROFILE custom avg_ms=%.3f total_ms=%.3f wall_ms=%.3f tflops=%.3f ratio_to_cublas=%.4f\n",
          custom_time.avg_ms, custom_time.total_ms, custom_time.wall_ms,
          custom_tflops, custom_vs_cublas);
-  printf("PROFILE total_measured_ms=%.3f cublas_total_ms=%.3f custom_total_ms=%.3f\n",
-         cublas_time.total_ms + custom_time.total_ms, cublas_time.total_ms, custom_time.total_ms);
+  printf("PROFILE custom_with_convert avg_ms=%.3f tflops=%.3f ratio_to_cublas=%.4f\n",
+         custom_with_convert_ms, custom_with_convert_tflops, custom_with_convert_vs_cublas);
+  printf("PROFILE total_measured_ms=%.3f convert_total_ms=%.3f cublas_total_ms=%.3f custom_total_ms=%.3f\n",
+         convert_time.total_ms + cublas_time.total_ms + custom_time.total_ms,
+         convert_time.total_ms, cublas_time.total_ms, custom_time.total_ms);
   printf("COMMIT_SUBJECT 修正内容: xx.xxx ms -> %.3f ms\n", custom_time.avg_ms);
+  printf("COMMIT_SUBJECT_WITH_CONVERT 修正内容: xx.xxx ms -> %.3f ms\n", custom_with_convert_ms);
 
   double err = 0;
   for (int i=0; i<n; i++) {
@@ -241,5 +273,7 @@ int main(int argc, const char **argv) {
   CUDA_CHECK(cudaFree(B));
   CUDA_CHECK(cudaFree(C));
   CUDA_CHECK(cudaFree(C2));
+  CUDA_CHECK(cudaFree(A_half));
+  CUDA_CHECK(cudaFree(B_half));
   CUBLAS_CHECK(cublasDestroy(cublas_handle));
 }
