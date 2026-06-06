@@ -19,6 +19,7 @@ constexpr int TILE_K = 16;
 constexpr int SMEM_PAD = 8;
 constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
 constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
+constexpr int LOAD_VECTOR_WIDTH = 2;
 constexpr int WARPS_PER_BLOCK = 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 
@@ -130,13 +131,19 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   for (int k = 0; k < dim_k; k += TILE_K) {
     __syncthreads();
-    for (int j = 0; j < TILE_K; ++j) {
-      block_a[j][i] = d_a[(k + j) * dim_m + offset_a_m + i];
+    for (int load = i; load < TILE_K * (TILE_M / LOAD_VECTOR_WIDTH); load += THREADS_PER_BLOCK) {
+      int a_k = load / (TILE_M / LOAD_VECTOR_WIDTH);
+      int a_m = (load % (TILE_M / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
+      const half2 *src = reinterpret_cast<const half2 *>(&d_a[(k + a_k) * dim_m + offset_a_m + a_m]);
+      half2 *dst = reinterpret_cast<half2 *>(&block_a[a_k][a_m]);
+      *dst = *src;
     }
-    for (int load = i; load < TILE_N * TILE_K; load += THREADS_PER_BLOCK) {
-      int b_n = load / TILE_K;
-      int b_k = load % TILE_K;
-      block_b[b_n][b_k] = d_b[(offset_b_n + b_n) * dim_k + k + b_k];
+    for (int load = i; load < TILE_N * (TILE_K / LOAD_VECTOR_WIDTH); load += THREADS_PER_BLOCK) {
+      int b_n = load / (TILE_K / LOAD_VECTOR_WIDTH);
+      int b_k = (load % (TILE_K / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
+      const half2 *src = reinterpret_cast<const half2 *>(&d_b[(offset_b_n + b_n) * dim_k + k + b_k]);
+      half2 *dst = reinterpret_cast<half2 *>(&block_b[b_n][b_k]);
+      *dst = *src;
     }
     __syncthreads();
     for (int r = 0; r < 2; r++) {
@@ -215,6 +222,7 @@ int main(int argc, const char **argv) {
          TILE_M, TILE_N, TILE_K, WARPS_PER_BLOCK, block.x, block.y, block.z, grid.x, grid.y, grid.z);
   printf("CONFIG smem_pad=%d smem_a_ld=%d smem_b_ld=%d\n",
          SMEM_PAD, SMEM_A_LD, SMEM_B_LD);
+  printf("CONFIG load_vector_width=%d\n", LOAD_VECTOR_WIDTH);
   printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
          convert_block, convert_a_grid, convert_b_grid);
   printf("CONFIG flops=%lld\n", (long long)num_flops);
