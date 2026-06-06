@@ -14,7 +14,7 @@ using namespace std;
 using namespace nvcuda;
 
 constexpr int TILE_M = 256;
-constexpr int TILE_N = 64;
+constexpr int TILE_N = 32;
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
