@@ -28,6 +28,7 @@ constexpr int WARPS_PER_BLOCK = 8;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 constexpr int WARP_M_FRAGS = 2;
 constexpr int WARP_N_FRAGS = TILE_N / WMMA_N;
+constexpr int DYNAMIC_SMEM_BYTES = (TILE_K * SMEM_A_LD + TILE_N * SMEM_B_LD) * int(sizeof(half));
 
 static const char *cublas_status_name(cublasStatus_t status) {
   switch (status) {
@@ -127,8 +128,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   int i = threadIdx.x;
   int warp_id = threadIdx.x / 32;
 
-  __shared__ half block_a[TILE_K][SMEM_A_LD];
-  __shared__ half block_b[TILE_N][SMEM_B_LD];
+  extern __shared__ half shared_storage[];
+  half *block_a = shared_storage;
+  half *block_b = block_a + TILE_K * SMEM_A_LD;
 
   wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[WARP_M_FRAGS][WARP_N_FRAGS];
   for (int r = 0; r < WARP_M_FRAGS; r++)
@@ -141,26 +143,26 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       int a_k = load / (TILE_M / LOAD_VECTOR_WIDTH);
       int a_m = (load % (TILE_M / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
       const uint2 *src = reinterpret_cast<const uint2 *>(&d_a[(k + a_k) * dim_m + offset_a_m + a_m]);
-      uint2 *dst = reinterpret_cast<uint2 *>(&block_a[a_k][a_m]);
+      uint2 *dst = reinterpret_cast<uint2 *>(&block_a[a_k * SMEM_A_LD + a_m]);
       *dst = *src;
     }
     for (int load = i; load < TILE_N * (TILE_K / LOAD_VECTOR_WIDTH); load += THREADS_PER_BLOCK) {
       int b_n = load / (TILE_K / LOAD_VECTOR_WIDTH);
       int b_k = (load % (TILE_K / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
       const uint2 *src = reinterpret_cast<const uint2 *>(&d_b[(offset_b_n + b_n) * dim_k + k + b_k]);
-      uint2 *dst = reinterpret_cast<uint2 *>(&block_b[b_n][b_k]);
+      uint2 *dst = reinterpret_cast<uint2 *>(&block_b[b_n * SMEM_B_LD + b_k]);
       *dst = *src;
     }
     __syncthreads();
     for (int kk = 0; kk < TILE_K; kk += WMMA_K) {
       wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag[WARP_N_FRAGS];
       for (int c = 0; c < WARP_N_FRAGS; c++) {
-        wmma::load_matrix_sync(b_frag[c], &block_b[c * WMMA_N][kk], SMEM_B_LD);
+        wmma::load_matrix_sync(b_frag[c], &block_b[(c * WMMA_N) * SMEM_B_LD + kk], SMEM_B_LD);
       }
       for (int r = 0; r < WARP_M_FRAGS; r++) {
         int row_tile = warp_id * WARP_M_FRAGS + r;
         wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
-        wmma::load_matrix_sync(a_frag, &block_a[kk][row_tile * WMMA_M], SMEM_A_LD);
+        wmma::load_matrix_sync(a_frag, &block_a[kk * SMEM_A_LD + row_tile * WMMA_M], SMEM_A_LD);
         for (int c = 0; c < WARP_N_FRAGS; c++) {
           wmma::mma_sync(acc[r][c], a_frag, b_frag[c], acc[r][c]);
         }
@@ -236,11 +238,15 @@ int main(int argc, const char **argv) {
          WARP_M_FRAGS, WARP_N_FRAGS);
   printf("CONFIG smem_pad=%d smem_a_ld=%d smem_b_ld=%d\n",
          SMEM_PAD, SMEM_A_LD, SMEM_B_LD);
+  printf("CONFIG dynamic_smem_bytes=%d\n", DYNAMIC_SMEM_BYTES);
   printf("CONFIG load_vector_width=%d\n", LOAD_VECTOR_WIDTH);
   printf("CONFIG reuse_b_fragments=%d\n", REUSE_B_FRAGMENTS);
   printf("CONFIG convert_block=%d convert_grid_a=%d convert_grid_b=%d\n",
          convert_block, convert_a_grid, convert_b_grid);
   printf("CONFIG flops=%lld\n", (long long)num_flops);
+  CUDA_CHECK(cudaFuncSetAttribute(kernel,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                  DYNAMIC_SMEM_BYTES));
 
   TimingResult convert_time = measure_gpu(warmup, repeat, [&]() {
     convert_float_to_half<<< convert_a_grid, convert_block >>>(A, A_half, int64_t(m) * int64_t(k));
@@ -267,12 +273,12 @@ int main(int argc, const char **argv) {
   double cublas_tflops = tflops_from_ms(num_flops, cublas_time.avg_ms);
 
   TimingResult custom_time = measure_gpu(warmup, repeat, [&]() {
-    kernel<<< grid, block >>>(m,
-			      n,
-			      k,
-			      A_half,
-			      B_half,
-			      C2);
+    kernel<<< grid, block, DYNAMIC_SMEM_BYTES >>>(m,
+						  n,
+						  k,
+						  A_half,
+						  B_half,
+						  C2);
     CUDA_CHECK(cudaGetLastError());
   });
   double custom_tflops = tflops_from_ms(num_flops, custom_time.avg_ms);
