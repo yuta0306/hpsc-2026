@@ -121,8 +121,7 @@ __global__ void convert_float_to_half(const float *input, half *output, int64_t 
   }
 }
 
-__global__ __launch_bounds__(THREADS_PER_BLOCK, 2)
-void kernel(int dim_m, int dim_n, int dim_k,
+__global__ void kernel(int dim_m, int dim_n, int dim_k,
 		       const half *d_a, const half *d_b, float *d_c) {
   int offset_a_m = TILE_M * blockIdx.x;
   int offset_b_n = TILE_N * blockIdx.y;
