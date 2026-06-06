@@ -24,15 +24,11 @@ constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
 constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
 constexpr int LOAD_VECTOR_WIDTH = 4;
 constexpr int REUSE_B_FRAGMENTS = 1;
-constexpr int CONSUMER_WARPS = 8;
-constexpr int PRODUCER_WARPS = 2;
-constexpr int WARPS_PER_BLOCK = CONSUMER_WARPS + PRODUCER_WARPS;
+constexpr int WARPS_PER_BLOCK = 8;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 constexpr int WARP_M_FRAGS = 2;
 constexpr int WARP_N_FRAGS = TILE_N / WMMA_N;
-constexpr int PIPELINE_STAGES = 2;
-constexpr int STAGE_SMEM_ELEMENTS = TILE_K * SMEM_A_LD + TILE_N * SMEM_B_LD;
-constexpr int DYNAMIC_SMEM_BYTES = PIPELINE_STAGES * STAGE_SMEM_ELEMENTS * int(sizeof(half));
+constexpr int DYNAMIC_SMEM_BYTES = (TILE_K * SMEM_A_LD + TILE_N * SMEM_B_LD) * int(sizeof(half));
 
 static const char *cublas_status_name(cublasStatus_t status) {
   switch (status) {
@@ -125,102 +121,60 @@ __global__ void convert_float_to_half(const float *input, half *output, int64_t 
   }
 }
 
-__device__ __forceinline__
-void load_shared_tile(int dim_m, int dim_k,
-		      int offset_a_m, int offset_b_n, int k,
-		      const half *d_a, const half *d_b,
-		      half *block_a, half *block_b,
-		      int loader_thread, int loader_threads) {
-  for (int load = loader_thread;
-       load < TILE_K * (TILE_M / LOAD_VECTOR_WIDTH);
-       load += loader_threads) {
-    int a_k = load / (TILE_M / LOAD_VECTOR_WIDTH);
-    int a_m = (load % (TILE_M / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
-    const uint2 *src = reinterpret_cast<const uint2 *>(&d_a[(k + a_k) * dim_m + offset_a_m + a_m]);
-    uint2 *dst = reinterpret_cast<uint2 *>(&block_a[a_k * SMEM_A_LD + a_m]);
-    *dst = *src;
-  }
-  for (int load = loader_thread;
-       load < TILE_N * (TILE_K / LOAD_VECTOR_WIDTH);
-       load += loader_threads) {
-    int b_n = load / (TILE_K / LOAD_VECTOR_WIDTH);
-    int b_k = (load % (TILE_K / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
-    const uint2 *src = reinterpret_cast<const uint2 *>(&d_b[(offset_b_n + b_n) * dim_k + k + b_k]);
-    uint2 *dst = reinterpret_cast<uint2 *>(&block_b[b_n * SMEM_B_LD + b_k]);
-    *dst = *src;
-  }
-}
-
 __global__ void kernel(int dim_m, int dim_n, int dim_k,
 		       const half *d_a, const half *d_b, float *d_c) {
   int offset_a_m = TILE_M * blockIdx.x;
   int offset_b_n = TILE_N * blockIdx.y;
   int i = threadIdx.x;
   int warp_id = threadIdx.x / 32;
-  bool is_consumer = warp_id < CONSUMER_WARPS;
-  int producer_thread = threadIdx.x - CONSUMER_WARPS * 32;
 
   extern __shared__ half shared_storage[];
+  half *block_a = shared_storage;
+  half *block_b = block_a + TILE_K * SMEM_A_LD;
 
   wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[WARP_M_FRAGS][WARP_N_FRAGS];
-  if (is_consumer) {
-    for (int r = 0; r < WARP_M_FRAGS; r++)
-      for (int c = 0; c < WARP_N_FRAGS; c++)
-        wmma::fill_fragment(acc[r][c], 0.0f);
-  }
+  for (int r = 0; r < WARP_M_FRAGS; r++)
+    for (int c = 0; c < WARP_N_FRAGS; c++)
+      wmma::fill_fragment(acc[r][c], 0.0f);
 
-  if (!is_consumer) {
-    half *stage_base = shared_storage;
-    half *block_a = stage_base;
-    half *block_b = block_a + TILE_K * SMEM_A_LD;
-    load_shared_tile(dim_m, dim_k, offset_a_m, offset_b_n, 0,
-		     d_a, d_b, block_a, block_b,
-		     producer_thread, PRODUCER_WARPS * 32);
-  }
-  __syncthreads();
-
-  int stage = 0;
   for (int k = 0; k < dim_k; k += TILE_K) {
-    int next_k = k + TILE_K;
-    int next_stage = stage ^ 1;
-
-    if (is_consumer) {
-      half *stage_base = shared_storage + stage * STAGE_SMEM_ELEMENTS;
-      half *block_a = stage_base;
-      half *block_b = block_a + TILE_K * SMEM_A_LD;
-      for (int kk = 0; kk < TILE_K; kk += WMMA_K) {
-        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag[WARP_N_FRAGS];
-        for (int c = 0; c < WARP_N_FRAGS; c++) {
-          wmma::load_matrix_sync(b_frag[c], &block_b[(c * WMMA_N) * SMEM_B_LD + kk], SMEM_B_LD);
-        }
-        for (int r = 0; r < WARP_M_FRAGS; r++) {
-          int row_tile = warp_id * WARP_M_FRAGS + r;
-          wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
-          wmma::load_matrix_sync(a_frag, &block_a[kk * SMEM_A_LD + row_tile * WMMA_M], SMEM_A_LD);
-          for (int c = 0; c < WARP_N_FRAGS; c++) {
-            wmma::mma_sync(acc[r][c], a_frag, b_frag[c], acc[r][c]);
-          }
-        }
-      }
-    } else if (next_k < dim_k) {
-      half *stage_base = shared_storage + next_stage * STAGE_SMEM_ELEMENTS;
-      half *block_a = stage_base;
-      half *block_b = block_a + TILE_K * SMEM_A_LD;
-      load_shared_tile(dim_m, dim_k, offset_a_m, offset_b_n, next_k,
-		       d_a, d_b, block_a, block_b,
-		       producer_thread, PRODUCER_WARPS * 32);
+    __syncthreads();
+    for (int load = i; load < TILE_K * (TILE_M / LOAD_VECTOR_WIDTH); load += THREADS_PER_BLOCK) {
+      int a_k = load / (TILE_M / LOAD_VECTOR_WIDTH);
+      int a_m = (load % (TILE_M / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
+      const uint2 *src = reinterpret_cast<const uint2 *>(&d_a[(k + a_k) * dim_m + offset_a_m + a_m]);
+      uint2 *dst = reinterpret_cast<uint2 *>(&block_a[a_k * SMEM_A_LD + a_m]);
+      *dst = *src;
+    }
+    for (int load = i; load < TILE_N * (TILE_K / LOAD_VECTOR_WIDTH); load += THREADS_PER_BLOCK) {
+      int b_n = load / (TILE_K / LOAD_VECTOR_WIDTH);
+      int b_k = (load % (TILE_K / LOAD_VECTOR_WIDTH)) * LOAD_VECTOR_WIDTH;
+      const uint2 *src = reinterpret_cast<const uint2 *>(&d_b[(offset_b_n + b_n) * dim_k + k + b_k]);
+      uint2 *dst = reinterpret_cast<uint2 *>(&block_b[b_n * SMEM_B_LD + b_k]);
+      *dst = *src;
     }
     __syncthreads();
-    stage = next_stage;
-  }
-  if (is_consumer) {
-    for (int r = 0; r < WARP_M_FRAGS; r++) {
+    for (int kk = 0; kk < TILE_K; kk += WMMA_K) {
+      wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag[WARP_N_FRAGS];
       for (int c = 0; c < WARP_N_FRAGS; c++) {
-        int c_m = offset_a_m + (warp_id * WARP_M_FRAGS + r) * WMMA_M;
-        int c_n = offset_b_n + c * WMMA_N;
-        if (c_n < dim_n && c_m < dim_m)
-          wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
+        wmma::load_matrix_sync(b_frag[c], &block_b[(c * WMMA_N) * SMEM_B_LD + kk], SMEM_B_LD);
       }
+      for (int r = 0; r < WARP_M_FRAGS; r++) {
+        int row_tile = warp_id * WARP_M_FRAGS + r;
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
+        wmma::load_matrix_sync(a_frag, &block_a[kk * SMEM_A_LD + row_tile * WMMA_M], SMEM_A_LD);
+        for (int c = 0; c < WARP_N_FRAGS; c++) {
+          wmma::mma_sync(acc[r][c], a_frag, b_frag[c], acc[r][c]);
+        }
+      }
+    }
+  }
+  for (int r = 0; r < WARP_M_FRAGS; r++) {
+    for (int c = 0; c < WARP_N_FRAGS; c++) {
+      int c_m = offset_a_m + (warp_id * WARP_M_FRAGS + r) * WMMA_M;
+      int c_n = offset_b_n + c * WMMA_N;
+      if (c_n < dim_n && c_m < dim_m)
+        wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
     }
   }
 }
@@ -282,8 +236,6 @@ int main(int argc, const char **argv) {
          WMMA_M, WMMA_N, WMMA_K, TILE_K / WMMA_K);
   printf("CONFIG warp_m_fragments=%d warp_n_fragments=%d\n",
          WARP_M_FRAGS, WARP_N_FRAGS);
-  printf("CONFIG consumer_warps=%d producer_warps=%d pipeline_stages=%d\n",
-         CONSUMER_WARPS, PRODUCER_WARPS, PIPELINE_STAGES);
   printf("CONFIG smem_pad=%d smem_a_ld=%d smem_b_ld=%d\n",
          SMEM_PAD, SMEM_A_LD, SMEM_B_LD);
   printf("CONFIG dynamic_smem_bytes=%d\n", DYNAMIC_SMEM_BYTES);
