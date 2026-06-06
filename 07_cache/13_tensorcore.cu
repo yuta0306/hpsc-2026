@@ -14,12 +14,12 @@ using namespace std;
 using namespace nvcuda;
 
 constexpr int TILE_M = 256;
-constexpr int TILE_N = 128;
+constexpr int TILE_N = 64;
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
 constexpr int TILE_K = 64;
-constexpr int SMEM_PAD = 0;
+constexpr int SMEM_PAD = 8;
 constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
 constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
 constexpr int LOAD_VECTOR_WIDTH = 2;
