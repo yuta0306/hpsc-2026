@@ -19,14 +19,14 @@ constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
 constexpr int TILE_K = 128;
-constexpr int SMEM_PAD = 16;
+constexpr int SMEM_PAD = 8;
 constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
 constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
 constexpr int LOAD_VECTOR_WIDTH = 4;
 constexpr int REUSE_B_FRAGMENTS = 1;
-constexpr int WARPS_PER_BLOCK = 8;
+constexpr int WARPS_PER_BLOCK = 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
-constexpr int WARP_M_FRAGS = 2;
+constexpr int WARP_M_FRAGS = 4;
 constexpr int WARP_N_FRAGS = TILE_N / WMMA_N;
 constexpr int DYNAMIC_SMEM_BYTES = (TILE_K * SMEM_A_LD + TILE_N * SMEM_B_LD) * int(sizeof(half));
 
