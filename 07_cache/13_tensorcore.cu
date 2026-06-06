@@ -14,9 +14,9 @@ using namespace std;
 using namespace nvcuda;
 
 constexpr int TILE_M = 128;
-constexpr int TILE_N = 128;
+constexpr int TILE_N = 64;
 constexpr int TILE_K = 16;
-constexpr int WARPS_PER_BLOCK = 8;
+constexpr int WARPS_PER_BLOCK = 4;
 constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32;
 
 static const char *cublas_status_name(cublasStatus_t status) {
@@ -127,10 +127,8 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
 
   for (int k = 0; k < dim_k; k += TILE_K) {
     __syncthreads();
-    for (int load = i; load < TILE_K * TILE_M; load += THREADS_PER_BLOCK) {
-      int a_k = load / TILE_M;
-      int a_m = load % TILE_M;
-      block_a[a_k][a_m] = d_a[(k + a_k) * dim_m + offset_a_m + a_m];
+    for (int j = 0; j < TILE_K; ++j) {
+      block_a[j][i] = d_a[(k + j) * dim_m + offset_a_m + i];
     }
     for (int load = i; load < TILE_N * TILE_K; load += THREADS_PER_BLOCK) {
       int b_n = load / TILE_K;
@@ -138,26 +136,21 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       block_b[b_n][b_k] = d_b[(offset_b_n + b_n) * dim_k + k + b_k];
     }
     __syncthreads();
-    int warp_m_group = warp_id % (TILE_M / 32);
-    int warp_n_group = warp_id / (TILE_M / 32);
     for (int r = 0; r < 2; r++) {
-      int row_tile = warp_m_group * 2 + r;
+      int row_tile = warp_id * 2 + r;
       wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
       wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], TILE_M);
       for (int c = 0; c < 4; c++) {
-        int col_tile = warp_n_group * 4 + c;
         wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[col_tile * 16][0], TILE_K);
+        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], TILE_K);
         wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
       }
     }
   }
   for (int r = 0; r < 2; r++) {
     for (int c = 0; c < 4; c++) {
-      int warp_m_group = warp_id % (TILE_M / 32);
-      int warp_n_group = warp_id / (TILE_M / 32);
-      int c_m = offset_a_m + (warp_m_group * 2 + r) * 16;
-      int c_n = offset_b_n + (warp_n_group * 4 + c) * 16;
+      int c_m = offset_a_m + (warp_id * 2 + r) * 16;
+      int c_n = offset_b_n + c * 16;
       if (c_n < dim_n && c_m < dim_m)
         wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
     }
