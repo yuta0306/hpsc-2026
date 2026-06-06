@@ -11,7 +11,7 @@
 #include <chrono>
 using namespace std;
 
-constexpr int TILE_M = 128;
+constexpr int TILE_M = 256;
 constexpr int TILE_N = 128;
 constexpr int TILE_K = 64;
 constexpr int WGMMA_M = 64;
