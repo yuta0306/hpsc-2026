@@ -1,3 +1,5 @@
+NVCC ?= /apps/t4/rhel9/cuda/13.1.1/bin/nvcc
+
 00_base: 00_base.cpp
 	g++ 00_base.cpp -O3
 01_loop_order: 01_loop_order.cpp
@@ -25,4 +27,4 @@
 12_vector_4x2: 12_vector_4x2.cu
 	nvcc 12_vector_4x2.cu -Xcompiler "-O3 -fopenmp" -lcublas
 13_tensorcore: 13_tensorcore.cu
-	nvcc 13_tensorcore.cu -arch=compute_90a -code=sm_90a -Xcompiler "-O3 -fopenmp" -lcublas
+	$(NVCC) 13_tensorcore.cu -arch=compute_90a -code=sm_90a -Xcompiler "-O3 -fopenmp" -lcublas
