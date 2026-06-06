@@ -15,7 +15,10 @@ using namespace nvcuda;
 
 constexpr int TILE_M = 128;
 constexpr int TILE_N = 64;
-constexpr int TILE_K = 16;
+constexpr int WMMA_M = 16;
+constexpr int WMMA_N = 16;
+constexpr int WMMA_K = 16;
+constexpr int TILE_K = 32;
 constexpr int SMEM_PAD = 8;
 constexpr int SMEM_A_LD = TILE_M + SMEM_PAD;
 constexpr int SMEM_B_LD = TILE_K + SMEM_PAD;
@@ -124,7 +127,7 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
   __shared__ half block_a[TILE_K][SMEM_A_LD];
   __shared__ half block_b[TILE_N][SMEM_B_LD];
 
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
+  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[2][4];
   for (int r = 0; r < 2; r++)
     for (int c = 0; c < 4; c++)
       wmma::fill_fragment(acc[r][c], 0.0f);
@@ -146,21 +149,23 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       *dst = *src;
     }
     __syncthreads();
-    for (int r = 0; r < 2; r++) {
-      int row_tile = warp_id * 2 + r;
-      wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], SMEM_A_LD);
-      for (int c = 0; c < 4; c++) {
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[c * 16][0], SMEM_B_LD);
-        wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
+    for (int kk = 0; kk < TILE_K; kk += WMMA_K) {
+      for (int r = 0; r < 2; r++) {
+        int row_tile = warp_id * 2 + r;
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
+        wmma::load_matrix_sync(a_frag, &block_a[kk][row_tile * WMMA_M], SMEM_A_LD);
+        for (int c = 0; c < 4; c++) {
+          wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
+          wmma::load_matrix_sync(b_frag, &block_b[c * WMMA_N][kk], SMEM_B_LD);
+          wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
+        }
       }
     }
   }
   for (int r = 0; r < 2; r++) {
     for (int c = 0; c < 4; c++) {
-      int c_m = offset_a_m + (warp_id * 2 + r) * 16;
-      int c_n = offset_b_n + c * 16;
+      int c_m = offset_a_m + (warp_id * 2 + r) * WMMA_M;
+      int c_n = offset_b_n + c * WMMA_N;
       if (c_n < dim_n && c_m < dim_m)
         wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
     }
@@ -220,6 +225,8 @@ int main(int argc, const char **argv) {
   printf("CONFIG m=%d n=%d k=%d repeat=%d warmup=%d\n", m, n, k, repeat, warmup);
   printf("CONFIG custom_tile_m=%d custom_tile_n=%d custom_tile_k=%d warps=%d block=(%d,%d,%d) grid=(%d,%d,%d)\n",
          TILE_M, TILE_N, TILE_K, WARPS_PER_BLOCK, block.x, block.y, block.z, grid.x, grid.y, grid.z);
+  printf("CONFIG wmma_m=%d wmma_n=%d wmma_k=%d k_stages_per_load=%d\n",
+         WMMA_M, WMMA_N, WMMA_K, TILE_K / WMMA_K);
   printf("CONFIG smem_pad=%d smem_a_ld=%d smem_b_ld=%d\n",
          SMEM_PAD, SMEM_A_LD, SMEM_B_LD);
   printf("CONFIG load_vector_width=%d\n", LOAD_VECTOR_WIDTH);
