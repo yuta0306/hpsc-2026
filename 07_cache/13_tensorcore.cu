@@ -13,7 +13,7 @@ using namespace std;
 
 constexpr int TILE_M = 256;
 constexpr int TILE_N = 128;
-constexpr int TILE_K = 128;
+constexpr int TILE_K = 256;
 constexpr int WGMMA_M = 64;
 constexpr int WGMMA_N = 128;
 constexpr int WGMMA_K = 16;
